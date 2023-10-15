@@ -1,0 +1,37 @@
+# Maven-specific files/folders
+target/
+mvnw
+mvnw.cmd
+src/main/resources/application.properties
+
+# Gradle-specific files/folders
+build/
+.gradle/
+.idea/
+gradle/
+gradlew
+gradlew.bat
+
+# IDE-specific files/folders
+*.iml
+.idea/
+*.ipr
+*.iws
+output/
+.idea_modules/
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Test output
+test-output/
+
+# Package files
+*.jar
+*.war
+*.ear
+
+# Miscellaneous
+*.class

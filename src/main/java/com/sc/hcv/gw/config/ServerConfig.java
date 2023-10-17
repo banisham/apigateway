@@ -1,17 +1,30 @@
 package com.sc.hcv.gw.config;
 
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.ssl.SSLContexts;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.embedded.tomcat.TomcatServletWebServerFactory;
 import org.springframework.boot.web.servlet.server.ServletWebServerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
-import org.springframework.core.io.Resource;
-
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.GetParameterRequest;
 
+import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Base64;
 import java.util.Map;
 
 @Configuration
@@ -35,16 +48,14 @@ public class ServerConfig {
     @Value("${vault.approle.secret-id-path}")
     private String secretIdPath;
 
+    @Value("${vault.tls.parms.kv.path}")
+    private String tlsParamsKvPath;
+
     @Value("${vault.retry.maxAttempts}")
     private int maxAttempts;
 
     @Value("${vault.retry.backoff.duration}")
     private long backoffDuration;
-
-    private Resource keyStore;
-    private String keyStorePassword;
-    private Resource trustStore;
-    private String trustStorePassword;
 
     @Bean
     public ServletWebServerFactory servletContainer() throws Exception {
@@ -55,6 +66,16 @@ public class ServerConfig {
         String vaultToken = authenticateWithVaultWithRetry(roleId, secretId, maxAttempts);
 
         // Fetch secrets using the Vault token (implement as needed)
+        Map<String, Object> tlsParams = readTLSParamsFromKV(vaultToken);
+
+        byte[] truststoreBytes = Base64.getDecoder().decode((String) tlsParams.get("truststore"));
+        URI truststoreURI = byteArrayToURI(truststoreBytes, "apigw-truststore");
+
+        byte[] keystoreBytes = Base64.getDecoder().decode((String) tlsParams.get("keystore"));
+        URI keystoreURI = byteArrayToURI(keystoreBytes, "apigw-keystore");
+
+        String truststorePassword = (String) tlsParams.get("truststorePassword");
+        String keystorePassword = (String) tlsParams.get("keystorePassword");
 
         // Set Tomcat's SSL settings
         TomcatServletWebServerFactory tomcat = new TomcatServletWebServerFactory();
@@ -64,11 +85,11 @@ public class ServerConfig {
             connector.setPort(tomcatConectorPort);
 
             connector.setAttribute("keyAlias", "yourKeyAlias"); // Set if you have a specific alias in keystore, otherwise remove this line
-            connector.setAttribute("keystorePass", keyStorePassword);
-            connector.setAttribute("keystoreFile", keyStore.getURI().toString());
-            connector.setAttribute("keyPass", keyStorePassword);
-            connector.setAttribute("truststorePass", trustStorePassword);
-            connector.setAttribute("truststoreFile", trustStore.getURI().toString());
+            connector.setAttribute("keystorePass", keystorePassword);
+            connector.setAttribute("keystoreFile", keystoreURI.toString());
+            connector.setAttribute("keyPass", keystorePassword);
+            connector.setAttribute("truststorePass", truststorePassword);
+            connector.setAttribute("truststoreFile", truststoreURI.toString());
             connector.setAttribute("clientAuth", "true");
             connector.setAttribute("sslProtocol", "TLS");
             connector.setAttribute("SSLEnabled", true);
@@ -109,6 +130,59 @@ public class ServerConfig {
                 .withDecryption(true)
                 .build();
         return ssmClient.getParameter(getParameterRequest).parameter().value();
+    }
+
+    private Map<String, Object> readTLSParamsFromKV(String vaultToken){
+
+        String VAULT_ENDPOINT = vaultUrl + tlsParamsKvPath;
+        RestTemplate restTemplate = new RestTemplate();
+
+        // SSL handling for Vault
+        // Note: This is a simplistic way of accepting all certificates.
+        // In a production environment, you should have a more restrictive trust strategy.
+        TrustStrategy acceptingTrustStrategy = (cert, authType) -> true;
+        SSLContext sslContext;
+        try {
+            sslContext = SSLContexts.custom().loadTrustMaterial(null, acceptingTrustStrategy).build();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set up SSL context", e);
+        }
+        CloseableHttpClient httpClient = HttpClients.custom().setSslcontext(sslContext).build();
+        HttpComponentsClientHttpRequestFactory factory = new HttpComponentsClientHttpRequestFactory(httpClient);
+        restTemplate.setRequestFactory(factory);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-Vault-Token", vaultToken);
+
+        HttpEntity<String> entity = new HttpEntity<>("parameters", headers);
+
+        ResponseEntity<String> response = null;
+        try {
+            response = restTemplate.exchange(VAULT_ENDPOINT, HttpMethod.GET, entity, String.class);
+            String responseBody = response.getBody();
+            Map<String, Object> responseData = OBJECT_MAPPER.readValue(responseBody, Map.class);
+            // Assuming the actual data you want is inside the "data" field of the Vault response
+            return (Map<String, Object>) responseData.get("data");
+        } catch (HttpStatusCodeException e) {
+            throw new RuntimeException("Failed to fetch data from Vault. Status code: " + e.getStatusCode(), e);
+        } catch (ResourceAccessException e) {
+            // Handle connectivity issues
+            throw new RuntimeException("Failed to access Vault", e);
+        } catch (Exception e) {
+            // Handle other exceptions
+            throw new RuntimeException("Unexpected error occurred while fetching data from Vault", e);
+        }
+    }
+
+    private URI byteArrayToURI(byte[] data, String tempFileName) throws IOException {
+        // Create a temporary file
+        Path tempFile = Files.createTempFile("resources/"+tempFileName, ".jks");
+
+        // Write the byte array to the temporary file
+        Files.write(tempFile, data);
+
+        // Return the URI
+        return tempFile.toUri();
     }
 }
 

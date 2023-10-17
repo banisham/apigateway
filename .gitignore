@@ -2,7 +2,6 @@
 target/
 mvnw
 mvnw.cmd
-src/main/resources/application.properties
 
 # Gradle-specific files/folders
 build/
